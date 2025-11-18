@@ -491,9 +491,15 @@ def fetch_chess_com_games(username, date, save_dir='chess_games', is_verbose=Tru
         if 'end_time' in df.columns:
             df['end_time'] = pd.to_datetime(df['end_time'], errors='coerce')
         
+        # Save DataFrame to CSV
+        csv_filename = f"{username}_{year}-{month:02d}_games.csv"
+        csv_filepath = save_path / csv_filename
+        df.to_csv(csv_filepath, index=False, encoding='utf-8')
+        
         if is_verbose:
             print(f"\n✅ Successfully saved {len(df)} games to {save_dir}/")
             print(f"📊 DataFrame created with {len(df)} rows and {len(df.columns)} columns")
+            print(f"💾 Saved metadata to CSV: {csv_filename}")
         
         return df
         
@@ -521,7 +527,7 @@ def fetch_chess_com_games(username, date, save_dir='chess_games', is_verbose=Tru
         return pd.DataFrame()
 
 
-def analyze_pgn_evaluations(pgn, engine_path=None, depth=10):
+def analyze_pgn_evaluations(pgn, engine_path=None, depth=10, data_dir=None):
     """
     Analyze a PGN game and return a DataFrame with move numbers, engine evaluations, and position metrics.
     
@@ -534,6 +540,9 @@ def analyze_pgn_evaluations(pgn, engine_path=None, depth=10):
         Common paths: 'stockfish', '/usr/bin/stockfish', '/usr/local/bin/stockfish'
     depth : int
         Engine search depth (default: 10)
+    data_dir : str or Path, optional
+        Path to folder with PGN and CSV files. If provided and CSV file with analysis exists,
+        will load from disk instead of analyzing. If not provided or CSV doesn't exist, will analyze and save.
     
     Returns:
     --------
@@ -544,13 +553,46 @@ def analyze_pgn_evaluations(pgn, engine_path=None, depth=10):
         pgn_path = Path(pgn)
         if pgn_path.exists():
             # It's a file path
+            pgn_file_path = pgn_path
             with open(pgn_path, 'r', encoding='utf-8') as f:
                 pgn_text = f.read()
         else:
             # It's PGN text content
             pgn_text = str(pgn)
+            pgn_file_path = None
     else:
         pgn_text = str(pgn)
+        pgn_file_path = None
+    
+    # Check if we should load from disk
+    if pgn_file_path is not None:
+        # Determine where to look for CSV file
+        if data_dir is not None:
+            search_dir = Path(data_dir)
+        else:
+            # Look in same directory as PGN file
+            search_dir = pgn_file_path.parent
+        
+        # Try to find corresponding CSV file
+        # CSV filename should match PGN filename but with _analysis.csv extension
+        pgn_stem = pgn_file_path.stem
+        csv_file_path = search_dir / f"{pgn_stem}_analysis.csv"
+        
+        if csv_file_path.exists():
+            # Load from CSV
+            try:
+                df = pd.read_csv(csv_file_path, encoding='utf-8')
+                # Convert datetime columns if they exist
+                for col in df.columns:
+                    if 'time' in col.lower() and df[col].dtype == 'object':
+                        try:
+                            df[col] = pd.to_datetime(df[col], errors='coerce')
+                        except:
+                            pass
+                return df
+            except Exception as e:
+                # If loading fails, continue with analysis
+                pass
     
     # Parse PGN
     game = chess.pgn.read_game(StringIO(pgn_text))
@@ -819,10 +861,24 @@ def analyze_pgn_evaluations(pgn, engine_path=None, depth=10):
     # Create DataFrame
     df = pd.DataFrame(evaluations_data)
     
+    # Save to CSV if data_dir is provided and we have a PGN file path
+    if data_dir is not None and pgn_file_path is not None:
+        data_dir_path = Path(data_dir)
+        data_dir_path.mkdir(exist_ok=True)
+        pgn_stem = pgn_file_path.stem
+        csv_file_path = data_dir_path / f"{pgn_stem}_analysis.csv"
+        df.to_csv(csv_file_path, index=False, encoding='utf-8')
+    elif pgn_file_path is not None:
+        # If no data_dir specified but we have a file path, save in same directory as PGN
+        pgn_dir = pgn_file_path.parent
+        pgn_stem = pgn_file_path.stem
+        csv_file_path = pgn_dir / f"{pgn_stem}_analysis.csv"
+        df.to_csv(csv_file_path, index=False, encoding='utf-8')
+    
     return df
 
 
-def analyze_games_from_chess_com(username, date, save_dir='chess_games', engine_path=None, depth=10, is_verbose=True):
+def analyze_games_from_chess_com(username, date, save_dir='chess_games', engine_path=None, depth=10, is_verbose=True, data_dir=None):
     """
     Fetch games from chess.com and analyze all of them, returning a wide DataFrame with all moves from all games.
     
@@ -840,11 +896,18 @@ def analyze_games_from_chess_com(username, date, save_dir='chess_games', engine_
         Engine search depth (default: 10)
     is_verbose : bool
         If True, print detailed progress information (default: True)
+    data_dir : str or Path, optional
+        Path to folder with PGN and CSV files. If provided, will try to load analysis from CSV files
+        instead of re-analyzing. If not provided, uses save_dir as data_dir.
     
     Returns:
     --------
     pd.DataFrame: Wide DataFrame with all moves from all games, including game metadata
     """
+    # Use save_dir as data_dir if data_dir not provided
+    if data_dir is None:
+        data_dir = save_dir
+    
     # Step 1: Fetch games
     if is_verbose:
         print("=" * 80)
@@ -874,8 +937,8 @@ def analyze_games_from_chess_com(username, date, save_dir='chess_games', engine_
             print(f"\nAnalyzing game {idx + 1}/{len(df_games)}: {game_id}")
         
         try:
-            # Analyze the game
-            df_moves = analyze_pgn_evaluations(pgn_path, engine_path=engine_path, depth=depth)
+            # Analyze the game (will load from CSV if available)
+            df_moves = analyze_pgn_evaluations(pgn_path, engine_path=engine_path, depth=depth, data_dir=data_dir)
             
             if not df_moves.empty:
                 # Add game metadata to each move row
