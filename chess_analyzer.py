@@ -5,7 +5,7 @@ Chess game analysis tools for fetching games from chess.com and analyzing them.
 
 import requests
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 import re
 import chess
