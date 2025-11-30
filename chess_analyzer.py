@@ -5,6 +5,7 @@ Chess game analysis tools for fetching games from chess.com and analyzing them.
 
 import requests
 import pandas as pd
+import numpy as np
 from datetime import datetime, timedelta
 from pathlib import Path
 import re
@@ -1288,7 +1289,6 @@ def get_data(date_start, date_finish, user_name, is_verbose=True):
     }
     
     total_saved = 0
-    current_date = start_date
     
     # Collect all year-month combinations in the date range
     # Note: date_finish is exclusive (not included in the range)
@@ -1302,18 +1302,29 @@ def get_data(date_start, date_finish, user_name, is_verbose=True):
             temp_date = temp_date.replace(year=temp_date.year + 1, month=1, day=1)
         else:
             temp_date = temp_date.replace(month=temp_date.month + 1, day=1)
+        # Make sure we don't go past end_date
+        if temp_date >= end_date:
+            break
     
-    # Fetch games for each year-month
+    if is_verbose:
+        print(f"\nWill process {len(year_months)} month(s): {sorted(year_months)}")
+    
+    # Simple for-loop through year-month tuples
     for year, month in sorted(year_months):
         if is_verbose:
             print(f"\n{'=' * 80}")
-            print(f"Fetching games for {user_name} from {year}-{month:02d}...")
+            print(f"Processing {year}-{month:02d}")
             print(f"{'=' * 80}")
         
         json_url = f"https://api.chess.com/pub/player/{user_name}/games/{year}/{month:02d}"
         
         try:
             response = requests.get(json_url, headers=headers, timeout=30)
+            # Check response status
+            if response.status_code != 200:
+                if is_verbose:
+                    print(f"❌ Request failed for {year}-{month:02d}: Status {response.status_code}")
+                continue
             response.raise_for_status()
             
             data = response.json()
@@ -1327,128 +1338,136 @@ def get_data(date_start, date_finish, user_name, is_verbose=True):
             if is_verbose:
                 print(f"Found {len(games_list)} games")
             
+            month_saved = 0
             # Process each game
             for i, game in enumerate(games_list):
-                # Extract unique game ID from URL
-                game_url = game.get('url', '')
-                game_id_match = re.search(r'/(\d+)$', game_url)
-                if game_id_match:
-                    unique_game_id = game_id_match.group(1)
-                else:
-                    # Fallback: use index if can't extract from URL
-                    unique_game_id = f"{user_name}_{year}{month:02d}_{i+1:04d}"
-                
-                # Get PGN content
-                pgn_content = game.get('pgn', '')
-                
-                if not pgn_content:
-                    continue
-                
-                # Extract game date from PGN headers
-                game_date_str = None
-                date_match = re.search(r'\[Date\s+"([^"]+)"\]', pgn_content)
-                if date_match:
-                    pgn_date_str = date_match.group(1)
-                    try:
-                        # Convert from PGN format (YYYY.MM.DD) to our format (YYYY-MM-DD)
-                        pgn_date = datetime.strptime(pgn_date_str, '%Y.%m.%d')
-                        game_date_str = pgn_date.strftime('%Y-%m-%d')
-                        
-                        # Check if date is in range (date_finish is exclusive)
-                        if pgn_date < start_date or pgn_date >= end_date:
-                            continue
-                    except:
+                try:
+                    # Extract unique game ID from URL
+                    game_url = game.get('url', '')
+                    game_id_match = re.search(r'/(\d+)$', game_url)
+                    if game_id_match:
+                        unique_game_id = game_id_match.group(1)
+                    else:
+                        # Fallback: use index if can't extract from URL
+                        unique_game_id = f"{user_name}_{year}{month:02d}_{i+1:04d}"
+                    
+                    # Get PGN content
+                    pgn_content = game.get('pgn', '')
+                    
+                    if not pgn_content:
                         continue
-                
-                if not game_date_str:
-                    continue
-                
-                # Save PGN file with pattern: yyyy-mm-dd_game_id.pgn
-                filename = f"{game_date_str}_game_{unique_game_id}.pgn"
-                filepath = pgn_dir / filename
-                
-                # Skip if file already exists
-                if filepath.exists():
+                    
+                    # Extract game date from PGN headers
+                    game_date_str = None
+                    date_match = re.search(r'\[Date\s+"([^"]+)"\]', pgn_content)
+                    if date_match:
+                        pgn_date_str = date_match.group(1)
+                        try:
+                            # Convert from PGN format (YYYY.MM.DD) to our format (YYYY-MM-DD)
+                            pgn_date = datetime.strptime(pgn_date_str, '%Y.%m.%d')
+                            game_date_str = pgn_date.strftime('%Y-%m-%d')
+                            
+                            # Check if date is in range (date_finish is exclusive)
+                            if pgn_date < start_date or pgn_date >= end_date:
+                                continue
+                        except:
+                            continue
+                    
+                    if not game_date_str:
+                        continue
+                    
+                    # Save PGN file with pattern: yyyy-mm-dd_game_id.pgn
+                    filename = f"{game_date_str}_game_{unique_game_id}.pgn"
+                    filepath = pgn_dir / filename
+                    
+                    # Skip if file already exists
+                    if filepath.exists():
+                        if is_verbose:
+                            print(f"  [{i+1}/{len(games_list)}] Skipped (exists): {filename}")
+                        continue
+                    
+                    with open(filepath, 'w', encoding='utf-8') as f:
+                        f.write(pgn_content)
+                    
+                    # Extract and save game metadata
+                    white = game.get('white', {})
+                    black = game.get('black', {})
+                    
+                    # Calculate points based on result
+                    white_result = white.get('result', '')
+                    black_result = black.get('result', '')
+                    
+                    white_points = 0.0
+                    if white_result == 'win':
+                        white_points = 1.0
+                    elif white_result == 'draw':
+                        white_points = 0.5
+                    
+                    black_points = 0.0
+                    if black_result == 'win':
+                        black_points = 1.0
+                    elif black_result == 'draw':
+                        black_points = 0.5
+                    
+                    # Extract time information
+                    end_time = game.get('end_time', 0)
+                    end_date_obj = datetime.fromtimestamp(end_time) if end_time else None
+                    
+                    # Build game metadata record
+                    game_meta = {
+                        'game_id': unique_game_id,
+                        'game_date': game_date_str,
+                        'url': game_url,
+                        'white_username': white.get('username', ''),
+                        'white_rating': white.get('rating', None),
+                        'white_result': white_result,
+                        'white_points': white_points,
+                        'black_username': black.get('username', ''),
+                        'black_rating': black.get('rating', None),
+                        'black_result': black_result,
+                        'black_points': black_points,
+                        'time_control': game.get('time_control', ''),
+                        'time_class': game.get('time_class', ''),  # blitz, rapid, bullet, etc.
+                        'rules': game.get('rules', ''),  # chess, chess960, etc.
+                        'end_time': end_date_obj,
+                        'end_timestamp': end_time,
+                        'rated': game.get('rated', False),
+                    }
+                    
+                    # Save metadata to CSV
+                    meta_filename = f"{game_date_str}_game_{unique_game_id}.csv"
+                    meta_filepath = game_meta_dir / meta_filename
+                    meta_df = pd.DataFrame([game_meta])
+                    meta_df.to_csv(meta_filepath, index=False, encoding='utf-8')
+                    
+                    total_saved += 1
+                    month_saved += 1
                     if is_verbose:
-                        print(f"  [{i+1}/{len(games_list)}] Skipped (exists): {filename}")
+                        print(f"  [{i+1}/{len(games_list)}] Saved: {filename} (metadata saved)")
+                
+                except Exception as e:
+                    if is_verbose:
+                        print(f"  ⚠️  Error processing game {i+1}/{len(games_list)}: {e}")
                     continue
-                
-                with open(filepath, 'w', encoding='utf-8') as f:
-                    f.write(pgn_content)
-                
-                # Extract and save game metadata
-                white = game.get('white', {})
-                black = game.get('black', {})
-                
-                # Calculate points based on result
-                white_result = white.get('result', '')
-                black_result = black.get('result', '')
-                
-                white_points = 0.0
-                if white_result == 'win':
-                    white_points = 1.0
-                elif white_result == 'draw':
-                    white_points = 0.5
-                
-                black_points = 0.0
-                if black_result == 'win':
-                    black_points = 1.0
-                elif black_result == 'draw':
-                    black_points = 0.5
-                
-                # Extract time information
-                end_time = game.get('end_time', 0)
-                end_date = datetime.fromtimestamp(end_time) if end_time else None
-                
-                # Build game metadata record
-                game_meta = {
-                    'game_id': unique_game_id,
-                    'game_date': game_date_str,
-                    'url': game_url,
-                    'white_username': white.get('username', ''),
-                    'white_rating': white.get('rating', None),
-                    'white_result': white_result,
-                    'white_points': white_points,
-                    'black_username': black.get('username', ''),
-                    'black_rating': black.get('rating', None),
-                    'black_result': black_result,
-                    'black_points': black_points,
-                    'time_control': game.get('time_control', ''),
-                    'time_class': game.get('time_class', ''),  # blitz, rapid, bullet, etc.
-                    'rules': game.get('rules', ''),  # chess, chess960, etc.
-                    'end_time': end_date,
-                    'end_timestamp': end_time,
-                    'rated': game.get('rated', False),
-                }
-                
-                # Save metadata to CSV
-                meta_filename = f"{game_date_str}_game_{unique_game_id}.csv"
-                meta_filepath = game_meta_dir / meta_filename
-                meta_df = pd.DataFrame([game_meta])
-                meta_df.to_csv(meta_filepath, index=False, encoding='utf-8')
-                
-                total_saved += 1
-                if is_verbose:
-                    print(f"  [{i+1}/{len(games_list)}] Saved: {filename} (metadata saved)")
+            
+            if is_verbose and month_saved > 0:
+                print(f"\n✅ Saved {month_saved} games from {year}-{month:02d}")
         
         except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 404:
-                if is_verbose:
-                    print(f"❌ No games found for user '{user_name}' in {year}-{month:02d}")
-            elif e.response.status_code == 403:
-                if is_verbose:
-                    print(f"❌ Access forbidden. Chess.com may be blocking the request.")
-            else:
-                if is_verbose:
-                    print(f"❌ HTTP Error {e.response.status_code}: {e}")
+            if is_verbose:
+                status_code = e.response.status_code if e.response else 'Unknown'
+                print(f"❌ HTTP Error for {year}-{month:02d}: Status {status_code}, Error: {e}")
+            continue
         except requests.exceptions.RequestException as e:
             if is_verbose:
-                print(f"❌ Request Error: {e}")
+                print(f"❌ Request Error for {year}-{month:02d}: {e}")
+            continue
         except Exception as e:
             if is_verbose:
-                print(f"❌ Error: {e}")
+                print(f"❌ Error processing {year}-{month:02d}: {e}")
                 import traceback
                 traceback.print_exc()
+            continue
     
     if is_verbose:
         print(f"\n✅ Total PGN files saved: {total_saved}")
@@ -1713,6 +1732,9 @@ def get_analysys_results(date_start, date_finish, is_verbose=True):
         print(f"Found {len(all_csv_files)} CSV files to load")
         print(f"{'=' * 80}")
     
+    # Load metadata directory for merging
+    game_meta_dir = Path('data') / 'game_meta'
+    
     # Load each CSV file and concatenate
     all_dataframes = []
     for i, csv_file in enumerate(sorted(all_csv_files), 1):
@@ -1729,6 +1751,38 @@ def get_analysys_results(date_start, date_finish, is_verbose=True):
                         df[col] = pd.to_datetime(df[col], errors='coerce')
                     except:
                         pass
+            
+            # Extract game date and ID from filename to load metadata
+            csv_stem = csv_file.stem  # e.g., "2025-07-15_game_140721976858"
+            date_match = re.search(r'(\d{4}-\d{2}-\d{2})', csv_stem)
+            game_id_match = re.search(r'game_(\d+)', csv_stem)
+            
+            # Merge metadata if available and not already in dataframe
+            if date_match and game_id_match:
+                game_date_str = date_match.group(1)
+                game_id = game_id_match.group(1)
+                meta_filepath = game_meta_dir / f"{game_date_str}_game_{game_id}.csv"
+                
+                if meta_filepath.exists():
+                    try:
+                        meta_df = pd.read_csv(meta_filepath, encoding='utf-8')
+                        if not meta_df.empty:
+                            game_meta = meta_df.iloc[0].to_dict()
+                            
+                            # Only add metadata columns that are missing or have null values
+                            for key, value in game_meta.items():
+                                if key not in df.columns or df[key].isna().all():
+                                    df[key] = value
+                            
+                            # Convert end_time to datetime if it's a string
+                            if 'end_time' in df.columns and df['end_time'].dtype == 'object':
+                                try:
+                                    df['end_time'] = pd.to_datetime(df['end_time'], errors='coerce')
+                                except:
+                                    pass
+                    except Exception as e:
+                        if is_verbose:
+                            print(f"  ⚠️  Could not load metadata for {csv_file.name}: {e}")
             
             if not df.empty:
                 all_dataframes.append(df)
@@ -1762,3 +1816,168 @@ def get_analysys_results(date_start, date_finish, is_verbose=True):
     
     return df_all
 
+def make_user_df(df):
+    """
+    Make a user base dataframe from the analysis results.
+    Parameters:
+    -----------
+    df : pd.DataFrame
+        Analysis results dataframe
+    
+    Returns:
+    --------
+    pd.DataFrame: User base dataframe
+    """
+
+    white_df = df[df['player'] == 'White'].copy()
+    white_df['color'] ='White'
+    white_df['player'] = white_df['white_username']
+    white_df['opponent'] = white_df['black_username']
+
+    white_df['result'] = white_df['white_result']
+    white_df['opponent_result'] = white_df['black_result']
+
+
+    white_df['points'] = white_df['white_points']
+    white_df['opponent_points'] = white_df['black_points']
+    
+    white_df['rating'] = white_df['white_rating']
+    white_df['opponent_rating'] = white_df['black_rating']
+
+    white_df['time_remaining'] = white_df['white_time_remaining']
+    white_df['opponent_time_remaining'] = white_df['black_time_remaining']
+
+    white_df['time_used'] = white_df['white_time_used']
+    white_df['opponent_time_used'] = white_df['black_time_used']
+
+    white_df['material'] = white_df['white_material']
+    white_df['opponent_material'] = white_df['black_material']
+
+    white_df['pawns'] = white_df['white_pawns']
+    white_df['opponent_pawns'] = white_df['black_pawns']
+
+    white_df['isolated_pawns'] = white_df['white_isolated_pawns']
+    white_df['opponent_isolated_pawns'] = white_df['black_isolated_pawns']
+
+    white_df['doubled_pawns'] = white_df['white_doubled_pawns']
+    white_df['opponent_doubled_pawns'] = white_df['black_doubled_pawns']
+
+    white_df['passed_pawns'] = white_df['white_passed_pawns']
+    white_df['opponent_passed_pawns'] = white_df['black_passed_pawns']
+
+    white_df['center_control'] = white_df['white_center_control']
+    white_df['opponent_center_control'] = white_df['black_center_control']
+
+    white_df['castled'] = white_df['white_castled']
+    white_df['opponent_castled'] = white_df['white_castled']
+
+    white_df['captures'] = white_df['white_captures']
+    white_df['opponent_captures'] = white_df['black_captures']
+
+    white_df['promotions'] = white_df['white_promotions']
+    white_df['opponent_promotions'] = white_df['black_promotions']
+
+    black_df = df[df['player'] == 'Black'].copy()
+    black_df['color'] = 'Black'
+    black_df['player'] = black_df['black_username']
+    black_df['opponent'] = black_df['white_username']
+
+    black_df['result'] = black_df['black_result']
+    black_df['opponent_result'] = black_df['white_result']
+
+    black_df['points'] = black_df['black_points']
+    black_df['opponent_points'] = black_df['white_points']
+
+    black_df['rating'] = black_df['black_rating']
+    black_df['opponent_rating'] = black_df['white_rating']
+
+    black_df['time_remaining'] = black_df['black_time_remaining']
+    black_df['opponent_time_remaining'] = black_df['white_time_remaining']
+
+    black_df['time_used'] = black_df['black_time_used']
+    black_df['opponent_time_used'] = black_df['white_time_used']
+
+    black_df['material'] = black_df['black_material']
+    black_df['opponent_material'] = black_df['white_material']
+
+    black_df['pawns'] = black_df['black_pawns']
+    black_df['opponent_pawns'] = black_df['white_pawns']
+
+    black_df['isolated_pawns'] = black_df['black_isolated_pawns']
+    black_df['opponent_isolated_pawns'] = black_df['white_isolated_pawns']
+
+    black_df['doubled_pawns'] = black_df['black_doubled_pawns']
+    black_df['opponent_doubled_pawns'] = black_df['white_doubled_pawns']
+
+    black_df['passed_pawns'] = black_df['black_passed_pawns']
+    black_df['opponent_passed_pawns'] = black_df['white_passed_pawns']
+
+    black_df['center_control'] = black_df['black_center_control']
+    black_df['opponent_center_control'] = black_df['white_center_control']
+
+    black_df['castled'] = black_df['black_castled']
+    black_df['opponent_castled'] = black_df['white_castled']
+
+    black_df['captures'] = black_df['black_captures']
+    black_df['opponent_captures'] = black_df['white_captures']
+
+    black_df['promotions'] = black_df['black_promotions']
+    black_df['opponent_promotions'] = black_df['white_promotions']
+
+    user_base_df = pd.concat([white_df, black_df])
+
+    user_base_df['game_end_time'] = user_base_df['end_time']
+    user_base_df['rating_difference'] = user_base_df['rating'] - user_base_df['opponent_rating']
+    user_base_df['material_balance'] = user_base_df['material'] - user_base_df['opponent_material']
+
+    user_base_df = user_base_df[[
+        'game_id',
+        'game_end_time',
+        'color',
+        'player',
+        'opponent',
+        'result',
+        'opponent_result',
+        'points',
+        'opponent_points',
+        'rating',
+        'opponent_rating',
+        'rating_difference',
+        'time_control', 'time_class', 'rules', 'rated',
+        'url',
+        'game_phase',
+        'move_number', 'full_move', 'move_san',
+        'evaluation', 'evaluation_pawns', 'eval_change',
+        'move_type',
+        'time_remaining',
+        'opponent_time_remaining',
+        'time_used',
+        'opponent_time_used',
+        'is_same_material_kind', 
+        'material', 'opponent_material', 'material_balance',
+        'is_capture', 'is_promotion',
+        'pawns',
+        'opponent_pawns', 'isolated_pawns', 'opponent_isolated_pawns',
+        'doubled_pawns', 'opponent_doubled_pawns', 'passed_pawns',
+        'opponent_passed_pawns', 'center_control', 'opponent_center_control',
+        'castled', 'opponent_castled', 'captures', 'opponent_captures',
+        'promotions', 'opponent_promotions'
+
+    ]]
+
+    user_base_df['game_id'] = user_base_df['game_id'].astype(str)
+    user_base_df['move_number'] = user_base_df['move_number'].astype(str)
+    user_base_df['full_move'] = user_base_df['full_move'].astype(str)
+
+    user_base_df['evaluation_pawns_relative'] = np.where(
+                                                            user_base_df['color'] == 'White', 
+                                                            user_base_df['evaluation_pawns'],
+                                                            -user_base_df['evaluation_pawns']
+                                                        )
+    user_base_df['evaluation_pawns_group'] = np.round(user_base_df['evaluation_pawns_relative'], 0).astype(int)
+    user_base_df['evaluation_pawns_relative_group'] = np.round(user_base_df['evaluation_pawns_relative'], 0).astype(int)
+    
+    return user_base_df
+    
+
+    
