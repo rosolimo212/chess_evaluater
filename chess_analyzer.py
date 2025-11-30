@@ -426,9 +426,25 @@ def fetch_chess_com_games(username, date, save_dir='chess_games', is_verbose=Tru
             # Get PGN content
             pgn_content = game.get('pgn', '')
             
-            # Save PGN file
-            filename = f"{username}_{year}-{month:02d}_game_{unique_game_id}.pgn"
-            filepath = save_path / filename
+            # Extract game date from PGN content or use end_time
+            game_date_str = date_obj.strftime('%Y-%m-%d')  # Default to the date parameter
+            if pgn_content:
+                # Try to extract date from PGN headers
+                date_match = re.search(r'\[Date\s+"([^"]+)"\]', pgn_content)
+                if date_match:
+                    pgn_date_str = date_match.group(1)
+                    # Convert from PGN format (YYYY.MM.DD) to our format (YYYY-MM-DD)
+                    try:
+                        pgn_date = datetime.strptime(pgn_date_str, '%Y.%m.%d')
+                        game_date_str = pgn_date.strftime('%Y-%m-%d')
+                    except:
+                        pass  # Use default if parsing fails
+            
+            # Save PGN file to data/pgn folder with pattern: yyyy-mm-dd_game_id.pgn
+            pgn_dir = Path(save_dir) / 'data' / 'pgn'
+            pgn_dir.mkdir(parents=True, exist_ok=True)
+            filename = f"{game_date_str}_game_{unique_game_id}.pgn"
+            filepath = pgn_dir / filename
             
             if pgn_content:
                 with open(filepath, 'w', encoding='utf-8') as f:
@@ -462,7 +478,7 @@ def fetch_chess_com_games(username, date, save_dir='chess_games', is_verbose=Tru
             # Build game record
             game_record = {
                 'game_id': unique_game_id,  # Unique identifier
-                'pgn_path': str(filepath),  # Path to PGN file
+                'pgn_path': str(filepath),  # Path to PGN file in data/pgn folder
                 'url': game_url,
                 'white_username': white.get('username', ''),
                 'white_rating': white.get('rating', None),
@@ -566,15 +582,63 @@ def analyze_pgn_evaluations(pgn, engine_path=None, depth=10, data_dir=None):
     
     # Check if we should load from disk
     if pgn_file_path is not None:
-        # Determine where to look for CSV file
+        # Try to extract game date and ID from filename
+        game_date_str = None
+        game_id = None
+        
+        # Extract date from filename (pattern: yyyy-mm-dd_game_id.pgn)
+        date_match = re.search(r'(\d{4}-\d{2}-\d{2})', pgn_file_path.stem)
+        if date_match:
+            game_date_str = date_match.group(1)
+        
+        # Extract game_id from filename
+        game_id_match = re.search(r'game_(\d+)', pgn_file_path.stem)
+        if game_id_match:
+            game_id = game_id_match.group(1)
+        
+        # Try to load from data/games_analysis first
+        if game_date_str and game_id:
+            # Determine games_analysis directory
+            if data_dir is not None:
+                data_dir_path = Path(data_dir)
+                # If data_dir is 'data', use it directly; otherwise assume it's the base directory
+                if data_dir_path.name == 'data':
+                    games_analysis_dir = data_dir_path / 'games_analysis'
+                else:
+                    games_analysis_dir = data_dir_path / 'data' / 'games_analysis'
+            else:
+                # Try to find data directory relative to PGN file
+                pgn_parent = pgn_file_path.parent
+                if pgn_parent.name == 'pgn':
+                    base_dir = pgn_parent.parent
+                else:
+                    base_dir = pgn_parent
+                games_analysis_dir = base_dir / 'data' / 'games_analysis'
+            
+            csv_file_path = games_analysis_dir / f"{game_date_str}_game_{game_id}.csv"
+            
+            if csv_file_path.exists():
+                # Load from CSV
+                try:
+                    df = pd.read_csv(csv_file_path, encoding='utf-8')
+                    # Convert datetime columns if they exist
+                    for col in df.columns:
+                        if 'time' in col.lower() and df[col].dtype == 'object':
+                            try:
+                                df[col] = pd.to_datetime(df[col], errors='coerce')
+                            except:
+                                pass
+                    return df
+                except Exception as e:
+                    # If loading fails, continue with analysis
+                    pass
+        
+        # Fallback: try old location/pattern
         if data_dir is not None:
             search_dir = Path(data_dir)
         else:
-            # Look in same directory as PGN file
             search_dir = pgn_file_path.parent
         
-        # Try to find corresponding CSV file
-        # CSV filename should match PGN filename but with _analysis.csv extension
         pgn_stem = pgn_file_path.stem
         csv_file_path = search_dir / f"{pgn_stem}_analysis.csv"
         
@@ -599,6 +663,31 @@ def analyze_pgn_evaluations(pgn, engine_path=None, depth=10, data_dir=None):
     if not game:
         raise ValueError("Could not parse PGN game")
     
+    # Extract game date and ID from PGN headers or filename
+    game_date_str = None
+    game_id = None
+    
+    # Try to get date from PGN headers
+    date_header = game.headers.get('Date', '')
+    if date_header:
+        try:
+            # PGN date format is YYYY.MM.DD
+            pgn_date = datetime.strptime(date_header, '%Y.%m.%d')
+            game_date_str = pgn_date.strftime('%Y-%m-%d')
+        except:
+            pass
+    
+    # Try to extract game_id from filename if available
+    if pgn_file_path is not None:
+        game_id_match = re.search(r'game_(\d+)', pgn_file_path.stem)
+        if game_id_match:
+            game_id = game_id_match.group(1)
+        # If date not found in headers, try to extract from filename
+        if not game_date_str:
+            date_match = re.search(r'(\d{4}-\d{2}-\d{2})', pgn_file_path.stem)
+            if date_match:
+                game_date_str = date_match.group(1)
+    
     # Get all moves
     board = game.board()
     moves = list(game.mainline_moves())
@@ -610,6 +699,9 @@ def analyze_pgn_evaluations(pgn, engine_path=None, depth=10, data_dir=None):
     # Parse time control from headers
     time_control_str = game.headers.get('TimeControl', '')
     initial_time, increment = parse_time_control(time_control_str)
+    
+    # Extract ECO code from headers
+    eco_code = game.headers.get('ECO', '')
     
     # Extract clock times from game nodes
     clock_times = []
@@ -703,6 +795,7 @@ def analyze_pgn_evaluations(pgn, engine_path=None, depth=10, data_dir=None):
             'white_time_used': 0.0,
             'black_time_used': 0.0,
             'time_used': None,  # No move at start
+            'eco_code': eco_code,  # ECO code of the opening
             **material,
             'white_isolated_pawns': count_isolated_pawns(board, chess.WHITE),
             'black_isolated_pawns': count_isolated_pawns(board, chess.BLACK),
@@ -831,6 +924,7 @@ def analyze_pgn_evaluations(pgn, engine_path=None, depth=10, data_dir=None):
                 'white_time_used': white_time_used,
                 'black_time_used': black_time_used,
                 'time_used': time_used,  # Time used for this specific move
+                'eco_code': eco_code,  # ECO code of the opening
                 **material,
                 'white_isolated_pawns': count_isolated_pawns(board, chess.WHITE),
                 'black_isolated_pawns': count_isolated_pawns(board, chess.BLACK),
@@ -861,8 +955,33 @@ def analyze_pgn_evaluations(pgn, engine_path=None, depth=10, data_dir=None):
     # Create DataFrame
     df = pd.DataFrame(evaluations_data)
     
-    # Save to CSV if data_dir is provided and we have a PGN file path
-    if data_dir is not None and pgn_file_path is not None:
+    # Save to CSV in data/games_analysis folder with pattern: yyyy-mm-dd_game_id.csv
+    if game_date_str and game_id:
+        # Determine games_analysis directory
+        if data_dir is not None:
+            data_dir_path = Path(data_dir)
+            # If data_dir is 'data', use it directly; otherwise assume it's the base directory
+            if data_dir_path.name == 'data':
+                games_analysis_dir = data_dir_path / 'games_analysis'
+            else:
+                games_analysis_dir = data_dir_path / 'data' / 'games_analysis'
+        elif pgn_file_path is not None:
+            # Try to find data directory relative to PGN file
+            pgn_parent = pgn_file_path.parent
+            if pgn_parent.name == 'pgn':
+                base_dir = pgn_parent.parent
+            else:
+                base_dir = pgn_parent
+            games_analysis_dir = base_dir / 'data' / 'games_analysis'
+        else:
+            games_analysis_dir = Path('data') / 'games_analysis'
+        
+        games_analysis_dir.mkdir(parents=True, exist_ok=True)
+        csv_filename = f"{game_date_str}_game_{game_id}.csv"
+        csv_file_path = games_analysis_dir / csv_filename
+        df.to_csv(csv_file_path, index=False, encoding='utf-8')
+    elif data_dir is not None and pgn_file_path is not None:
+        # Fallback to old behavior if date/id not available
         data_dir_path = Path(data_dir)
         data_dir_path.mkdir(exist_ok=True)
         pgn_stem = pgn_file_path.stem
@@ -889,7 +1008,7 @@ def analyze_games_from_chess_com(username, date, save_dir='chess_games', engine_
     date : str or datetime
         Date in format 'YYYY-MM-DD' or datetime object
     save_dir : str
-        Directory to save PGN files (default: 'chess_games')
+        Base directory (default: 'chess_games'). PGN files will be saved to save_dir/data/pgn
     engine_path : str, optional
         Path to chess engine executable. If None, will try to find Stockfish automatically.
     depth : int
@@ -897,8 +1016,8 @@ def analyze_games_from_chess_com(username, date, save_dir='chess_games', engine_
     is_verbose : bool
         If True, print detailed progress information (default: True)
     data_dir : str or Path, optional
-        Path to folder with PGN and CSV files. If provided, will try to load analysis from CSV files
-        instead of re-analyzing. If not provided, uses save_dir as data_dir.
+        Base directory for loading analysis CSV files. If provided, will try to load analysis from CSV files
+        in data_dir/data/games_analysis instead of re-analyzing. If not provided, uses save_dir as data_dir.
     
     Returns:
     --------
@@ -937,7 +1056,7 @@ def analyze_games_from_chess_com(username, date, save_dir='chess_games', engine_
             print(f"\nAnalyzing game {idx + 1}/{len(df_games)}: {game_id}")
         
         try:
-            # Analyze the game (will load from CSV if available)
+            # Analyze the game (will load from CSV in data/games_analysis if available)
             df_moves = analyze_pgn_evaluations(pgn_path, engine_path=engine_path, depth=depth, data_dir=data_dir)
             
             if not df_moves.empty:
@@ -978,4 +1097,668 @@ def analyze_games_from_chess_com(username, date, save_dir='chess_games', engine_
         print(f"📋 Columns: {len(df_all_moves.columns)}")
     
     return df_all_moves
+
+
+def start_analyze(user_name, date_range, is_verbose=True, is_api=1, path='chess_games', engine_path=None, depth=10):
+    """
+    Analyze chess games from chess.com for a user over a date range.
+    This is a convenience function that handles date ranges and combines results.
+    
+    Parameters:
+    -----------
+    user_name : str
+        Chess.com username
+    date_range : tuple
+        Tuple of (start_date, end_date) in format 'YYYY-MM-DD'
+    is_verbose : bool
+        If True, print detailed progress information (default: True)
+    is_api : int
+        If 1, fetch games from chess.com API. If 0, only analyze existing PGN files (default: 1)
+    path : str
+        Directory to save/load PGN files (default: 'chess_games')
+    engine_path : str, optional
+        Path to chess engine executable. If None, will try to find Stockfish automatically.
+    depth : int
+        Engine search depth (default: 10)
+    
+    Returns:
+    --------
+    pd.DataFrame: Wide DataFrame with all moves from all games, including game metadata and ECO codes
+    """
+    start_date_str, end_date_str = date_range
+    start_date = datetime.strptime(start_date_str, '%Y-%m-%d')
+    end_date = datetime.strptime(end_date_str, '%Y-%m-%d')
+    
+    all_dataframes = []
+    
+    if is_api == 1:
+        # Fetch and analyze games from chess.com API (day by day)
+        current_date = start_date
+        while current_date <= end_date:
+            date_str = current_date.strftime('%Y-%m-%d')
+            
+            if is_verbose:
+                print(f"\n{'=' * 80}")
+                print(f"Processing date: {date_str}")
+                print(f"{'=' * 80}")
+            
+            # Fetch and analyze games from chess.com API
+            df_date = analyze_games_from_chess_com(
+                username=user_name,
+                date=current_date,
+                save_dir=path,
+                engine_path=engine_path,
+                depth=depth,
+                is_verbose=is_verbose,
+                data_dir=path
+            )
+            
+            if not df_date.empty:
+                all_dataframes.append(df_date)
+            
+            # Move to next date
+            current_date += timedelta(days=1)
+    else:
+        # Load existing analysis CSV files from data/games_analysis folder
+        # Files are named with pattern: yyyy-mm-dd_game_id.csv
+        path_obj = Path(path)
+        if not path_obj.is_absolute():
+            # If path is relative, resolve it relative to current working directory
+            path_obj = Path(path).resolve()
+        
+        # Look for CSV files in data/games_analysis folder
+        games_analysis_dir = path_obj / 'data' / 'games_analysis'
+        
+        if not games_analysis_dir.exists():
+            if is_verbose:
+                print(f"Directory {games_analysis_dir} does not exist.")
+                print(f"Current working directory: {Path.cwd()}")
+            return pd.DataFrame()
+        
+        if is_verbose:
+            print(f"Loading CSV files from: {games_analysis_dir}")
+            print(f"Date range: {start_date_str} to {end_date_str}")
+        
+        # Find all CSV files in the date range
+        all_csv_files = []
+        current_date = start_date
+        while current_date <= end_date:
+            date_str = current_date.strftime('%Y-%m-%d')
+            # Pattern: yyyy-mm-dd_game_*.csv
+            pattern = f"{date_str}_game_*.csv"
+            csv_files = list(games_analysis_dir.glob(pattern))
+            all_csv_files.extend(csv_files)
+            current_date += timedelta(days=1)
+        
+        if not all_csv_files:
+            if is_verbose:
+                print(f"No CSV files found for date range {start_date_str} to {end_date_str}.")
+            return pd.DataFrame()
+        
+        if is_verbose:
+            print(f"\n{'=' * 80}")
+            print(f"Found {len(all_csv_files)} CSV files to load")
+            print(f"{'=' * 80}")
+        
+        # Load each CSV file and concatenate
+        all_moves_data = []
+        for csv_file in sorted(all_csv_files):
+            if is_verbose:
+                print(f"Loading {csv_file.name}...")
+            
+            try:
+                df_moves = pd.read_csv(csv_file, encoding='utf-8')
+                
+                # Convert datetime columns if they exist
+                for col in df_moves.columns:
+                    if 'time' in col.lower() and df_moves[col].dtype == 'object':
+                        try:
+                            df_moves[col] = pd.to_datetime(df_moves[col], errors='coerce')
+                        except:
+                            pass
+                
+                if not df_moves.empty:
+                    all_moves_data.append(df_moves)
+                    
+                    if is_verbose:
+                        print(f"  ✅ Loaded {len(df_moves)} moves")
+            
+            except Exception as e:
+                if is_verbose:
+                    print(f"  ❌ Error loading {csv_file.name}: {e}")
+                continue
+        
+        if all_moves_data:
+            df_date = pd.concat(all_moves_data, ignore_index=True)
+            all_dataframes.append(df_date)
+    
+    # Combine all dataframes
+    if not all_dataframes:
+        if is_verbose:
+            print("\nNo games were found or analyzed.")
+        return pd.DataFrame()
+    
+    df_all = pd.concat(all_dataframes, ignore_index=True)
+    
+    if is_verbose:
+        print(f"\n{'=' * 80}")
+        print("FINAL SUMMARY")
+        print(f"{'=' * 80}")
+        print(f"✅ Total moves analyzed: {len(df_all)}")
+        print(f"📊 DataFrame shape: {df_all.shape}")
+        print(f"📋 Columns: {len(df_all.columns)}")
+        if 'eco_code' in df_all.columns:
+            eco_counts = df_all['eco_code'].value_counts()
+            print(f"📚 Unique ECO codes: {len(eco_counts)}")
+    
+    return df_all
+
+
+def get_data(date_start, date_finish, user_name, is_verbose=True):
+    """
+    Get data from chess.com API and save PGN files to data/pgn folder and metadata to data/game_meta folder.
+    
+    Parameters:
+    -----------
+    date_start : str
+        Start date in format 'YYYY-MM-DD' (inclusive)
+    date_finish : str
+        End date in format 'YYYY-MM-DD' (exclusive - not included in range)
+    user_name : str
+        Chess.com username
+    is_verbose : bool
+        If True, print detailed progress information (default: True)
+    
+    Returns:
+    --------
+    int: Number of PGN files saved
+    """
+    start_date = datetime.strptime(date_start, '%Y-%m-%d')
+    end_date = datetime.strptime(date_finish, '%Y-%m-%d')
+    
+    # Create directories
+    pgn_dir = Path('data') / 'pgn'
+    pgn_dir.mkdir(parents=True, exist_ok=True)
+    game_meta_dir = Path('data') / 'game_meta'
+    game_meta_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Chess.com API requires User-Agent header to avoid 403 errors
+    headers = {
+        'User-Agent': 'ChessGameAnalyzer/1.0 (https://github.com/yourusername/chess-analyzer)'
+    }
+    
+    total_saved = 0
+    current_date = start_date
+    
+    # Collect all year-month combinations in the date range
+    # Note: date_finish is exclusive (not included in the range)
+    year_months = set()
+    temp_date = start_date
+    while temp_date < end_date:
+        year_month = (temp_date.year, temp_date.month)
+        year_months.add(year_month)
+        # Move to first day of next month
+        if temp_date.month == 12:
+            temp_date = temp_date.replace(year=temp_date.year + 1, month=1, day=1)
+        else:
+            temp_date = temp_date.replace(month=temp_date.month + 1, day=1)
+    
+    # Fetch games for each year-month
+    for year, month in sorted(year_months):
+        if is_verbose:
+            print(f"\n{'=' * 80}")
+            print(f"Fetching games for {user_name} from {year}-{month:02d}...")
+            print(f"{'=' * 80}")
+        
+        json_url = f"https://api.chess.com/pub/player/{user_name}/games/{year}/{month:02d}"
+        
+        try:
+            response = requests.get(json_url, headers=headers, timeout=30)
+            response.raise_for_status()
+            
+            data = response.json()
+            games_list = data.get('games', [])
+            
+            if not games_list:
+                if is_verbose:
+                    print(f"No games found for {user_name} in {year}-{month:02d}")
+                continue
+            
+            if is_verbose:
+                print(f"Found {len(games_list)} games")
+            
+            # Process each game
+            for i, game in enumerate(games_list):
+                # Extract unique game ID from URL
+                game_url = game.get('url', '')
+                game_id_match = re.search(r'/(\d+)$', game_url)
+                if game_id_match:
+                    unique_game_id = game_id_match.group(1)
+                else:
+                    # Fallback: use index if can't extract from URL
+                    unique_game_id = f"{user_name}_{year}{month:02d}_{i+1:04d}"
+                
+                # Get PGN content
+                pgn_content = game.get('pgn', '')
+                
+                if not pgn_content:
+                    continue
+                
+                # Extract game date from PGN headers
+                game_date_str = None
+                date_match = re.search(r'\[Date\s+"([^"]+)"\]', pgn_content)
+                if date_match:
+                    pgn_date_str = date_match.group(1)
+                    try:
+                        # Convert from PGN format (YYYY.MM.DD) to our format (YYYY-MM-DD)
+                        pgn_date = datetime.strptime(pgn_date_str, '%Y.%m.%d')
+                        game_date_str = pgn_date.strftime('%Y-%m-%d')
+                        
+                        # Check if date is in range (date_finish is exclusive)
+                        if pgn_date < start_date or pgn_date >= end_date:
+                            continue
+                    except:
+                        continue
+                
+                if not game_date_str:
+                    continue
+                
+                # Save PGN file with pattern: yyyy-mm-dd_game_id.pgn
+                filename = f"{game_date_str}_game_{unique_game_id}.pgn"
+                filepath = pgn_dir / filename
+                
+                # Skip if file already exists
+                if filepath.exists():
+                    if is_verbose:
+                        print(f"  [{i+1}/{len(games_list)}] Skipped (exists): {filename}")
+                    continue
+                
+                with open(filepath, 'w', encoding='utf-8') as f:
+                    f.write(pgn_content)
+                
+                # Extract and save game metadata
+                white = game.get('white', {})
+                black = game.get('black', {})
+                
+                # Calculate points based on result
+                white_result = white.get('result', '')
+                black_result = black.get('result', '')
+                
+                white_points = 0.0
+                if white_result == 'win':
+                    white_points = 1.0
+                elif white_result == 'draw':
+                    white_points = 0.5
+                
+                black_points = 0.0
+                if black_result == 'win':
+                    black_points = 1.0
+                elif black_result == 'draw':
+                    black_points = 0.5
+                
+                # Extract time information
+                end_time = game.get('end_time', 0)
+                end_date = datetime.fromtimestamp(end_time) if end_time else None
+                
+                # Build game metadata record
+                game_meta = {
+                    'game_id': unique_game_id,
+                    'game_date': game_date_str,
+                    'url': game_url,
+                    'white_username': white.get('username', ''),
+                    'white_rating': white.get('rating', None),
+                    'white_result': white_result,
+                    'white_points': white_points,
+                    'black_username': black.get('username', ''),
+                    'black_rating': black.get('rating', None),
+                    'black_result': black_result,
+                    'black_points': black_points,
+                    'time_control': game.get('time_control', ''),
+                    'time_class': game.get('time_class', ''),  # blitz, rapid, bullet, etc.
+                    'rules': game.get('rules', ''),  # chess, chess960, etc.
+                    'end_time': end_date,
+                    'end_timestamp': end_time,
+                    'rated': game.get('rated', False),
+                }
+                
+                # Save metadata to CSV
+                meta_filename = f"{game_date_str}_game_{unique_game_id}.csv"
+                meta_filepath = game_meta_dir / meta_filename
+                meta_df = pd.DataFrame([game_meta])
+                meta_df.to_csv(meta_filepath, index=False, encoding='utf-8')
+                
+                total_saved += 1
+                if is_verbose:
+                    print(f"  [{i+1}/{len(games_list)}] Saved: {filename} (metadata saved)")
+        
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 404:
+                if is_verbose:
+                    print(f"❌ No games found for user '{user_name}' in {year}-{month:02d}")
+            elif e.response.status_code == 403:
+                if is_verbose:
+                    print(f"❌ Access forbidden. Chess.com may be blocking the request.")
+            else:
+                if is_verbose:
+                    print(f"❌ HTTP Error {e.response.status_code}: {e}")
+        except requests.exceptions.RequestException as e:
+            if is_verbose:
+                print(f"❌ Request Error: {e}")
+        except Exception as e:
+            if is_verbose:
+                print(f"❌ Error: {e}")
+                import traceback
+                traceback.print_exc()
+    
+    if is_verbose:
+        print(f"\n✅ Total PGN files saved: {total_saved}")
+    
+    return total_saved
+
+
+def analyze_game(path, engine_path=None, is_verbose=True, depth=10):
+    """
+    Analyze a single game and save the result to data/games_analysis folder.
+    Merges game metadata from data/game_meta folder if available.
+    
+    Parameters:
+    -----------
+    path : str or Path
+        Path to PGN file
+    engine_path : str, optional
+        Path to chess engine executable. If None, will try to find Stockfish automatically.
+    is_verbose : bool
+        If True, print detailed progress information (default: True)
+    depth : int
+        Engine search depth (default: 10)
+    
+    Returns:
+    --------
+    bool: True if analysis was successful, False otherwise
+    """
+    pgn_path = Path(path)
+    
+    if not pgn_path.exists():
+        if is_verbose:
+            print(f"❌ PGN file not found: {pgn_path}")
+        return False
+    
+    # Extract game date and ID from filename (pattern: yyyy-mm-dd_game_id.pgn)
+    date_match = re.search(r'(\d{4}-\d{2}-\d{2})', pgn_path.stem)
+    game_id_match = re.search(r'game_(\d+)', pgn_path.stem)
+    
+    if not date_match or not game_id_match:
+        if is_verbose:
+            print(f"❌ Cannot extract date or game_id from filename: {pgn_path.name}")
+        return False
+    
+    game_date_str = date_match.group(1)
+    game_id = game_id_match.group(1)
+    
+    # Check if analysis already exists
+    games_analysis_dir = Path('data') / 'games_analysis'
+    games_analysis_dir.mkdir(parents=True, exist_ok=True)
+    csv_file_path = games_analysis_dir / f"{game_date_str}_game_{game_id}.csv"
+    
+    if csv_file_path.exists():
+        if is_verbose:
+            print(f"⏭️  Analysis already exists: {csv_file_path.name}")
+        return True
+    
+    if is_verbose:
+        print(f"Analyzing {pgn_path.name}...")
+    
+    try:
+        # Load game metadata if available
+        game_meta_dir = Path('data') / 'game_meta'
+        meta_filepath = game_meta_dir / f"{game_date_str}_game_{game_id}.csv"
+        
+        game_meta = None
+        if meta_filepath.exists():
+            try:
+                meta_df = pd.read_csv(meta_filepath, encoding='utf-8')
+                if not meta_df.empty:
+                    game_meta = meta_df.iloc[0].to_dict()
+                    # Convert end_time to datetime if it's a string
+                    if 'end_time' in game_meta and isinstance(game_meta['end_time'], str):
+                        try:
+                            game_meta['end_time'] = pd.to_datetime(game_meta['end_time'])
+                        except:
+                            pass
+            except Exception as e:
+                if is_verbose:
+                    print(f"  ⚠️  Could not load metadata: {e}")
+        
+        # Use the existing analyze_pgn_evaluations function
+        df = analyze_pgn_evaluations(
+            pgn_path,
+            engine_path=engine_path,
+            depth=depth,
+            data_dir='data'  # This will save to data/games_analysis
+        )
+        
+        if df.empty:
+            if is_verbose:
+                print(f"  ⚠️  No moves found in game")
+            return False
+        
+        # Merge metadata with analysis DataFrame
+        if game_meta:
+            for key, value in game_meta.items():
+                df[key] = value
+        
+        # Save the merged DataFrame
+        games_analysis_dir = Path('data') / 'games_analysis'
+        games_analysis_dir.mkdir(parents=True, exist_ok=True)
+        csv_file_path = games_analysis_dir / f"{game_date_str}_game_{game_id}.csv"
+        df.to_csv(csv_file_path, index=False, encoding='utf-8')
+        
+        if is_verbose:
+            print(f"  ✅ Analyzed {len(df)} moves")
+            if game_meta:
+                print(f"  ✅ Merged with metadata")
+        
+        return True
+    
+    except Exception as e:
+        if is_verbose:
+            print(f"  ❌ Error analyzing game: {e}")
+            import traceback
+            traceback.print_exc()
+        return False
+
+
+def analyze_games(date_start, date_finish, user_name, engine_path=None, is_verbose=True, depth=10):
+    """
+    Launch analyze_game() for all games in the date range.
+    
+    Parameters:
+    -----------
+    date_start : str
+        Start date in format 'YYYY-MM-DD' (inclusive)
+    date_finish : str
+        End date in format 'YYYY-MM-DD' (exclusive - not included in range)
+    user_name : str
+        Chess.com username (used to filter PGN files if needed)
+    engine_path : str, optional
+        Path to chess engine executable. If None, will try to find Stockfish automatically.
+    is_verbose : bool
+        If True, print detailed progress information (default: True)
+    depth : int
+        Engine search depth (default: 10)
+    
+    Returns:
+    --------
+    dict: Statistics with 'total', 'analyzed', 'skipped', 'errors'
+    """
+    start_date = datetime.strptime(date_start, '%Y-%m-%d')
+    end_date = datetime.strptime(date_finish, '%Y-%m-%d')
+    
+    # Find all PGN files in the date range
+    pgn_dir = Path('data') / 'pgn'
+    
+    if not pgn_dir.exists():
+        if is_verbose:
+            print(f"❌ PGN directory does not exist: {pgn_dir}")
+        return {'total': 0, 'analyzed': 0, 'skipped': 0, 'errors': 0}
+    
+    # Find all PGN files in the date range (date_finish is exclusive)
+    all_pgn_files = []
+    current_date = start_date
+    while current_date < end_date:
+        date_str = current_date.strftime('%Y-%m-%d')
+        pattern = f"{date_str}_game_*.pgn"
+        pgn_files = list(pgn_dir.glob(pattern))
+        all_pgn_files.extend(pgn_files)
+        current_date += timedelta(days=1)
+    
+    if not all_pgn_files:
+        if is_verbose:
+            print(f"No PGN files found for date range {date_start} to {date_finish}")
+        return {'total': 0, 'analyzed': 0, 'skipped': 0, 'errors': 0}
+    
+    if is_verbose:
+        print(f"\n{'=' * 80}")
+        print(f"Found {len(all_pgn_files)} PGN files to analyze")
+        print(f"{'=' * 80}")
+    
+    stats = {'total': len(all_pgn_files), 'analyzed': 0, 'skipped': 0, 'errors': 0}
+    
+    # Analyze each game
+    for i, pgn_file in enumerate(sorted(all_pgn_files), 1):
+        if is_verbose:
+            print(f"\n[{i}/{len(all_pgn_files)}] ", end='')
+        
+        # Check if analysis already exists before analyzing
+        date_match = re.search(r'(\d{4}-\d{2}-\d{2})', pgn_file.stem)
+        game_id_match = re.search(r'game_(\d+)', pgn_file.stem)
+        
+        if date_match and game_id_match:
+            csv_file = Path('data') / 'games_analysis' / f"{date_match.group(1)}_game_{game_id_match.group(1)}.csv"
+            if csv_file.exists():
+                stats['skipped'] += 1
+                if is_verbose:
+                    print(f"⏭️  Skipped (already exists): {pgn_file.name}")
+                continue
+        
+        # Analyze the game
+        result = analyze_game(pgn_file, engine_path=engine_path, is_verbose=is_verbose, depth=depth)
+        
+        if result:
+            stats['analyzed'] += 1
+        else:
+            stats['errors'] += 1
+    
+    if is_verbose:
+        print(f"\n{'=' * 80}")
+        print("ANALYSIS SUMMARY")
+        print(f"{'=' * 80}")
+        print(f"Total games: {stats['total']}")
+        print(f"Analyzed: {stats['analyzed']}")
+        print(f"Skipped (already exists): {stats['skipped']}")
+        print(f"Errors: {stats['errors']}")
+    
+    return stats
+
+
+def get_analysys_results(date_start, date_finish, is_verbose=True):
+    """
+    Concatenate CSV files from data/games_analysis folder by date range.
+    
+    Parameters:
+    -----------
+    date_start : str
+        Start date in format 'YYYY-MM-DD' (inclusive)
+    date_finish : str
+        End date in format 'YYYY-MM-DD' (exclusive - not included in range)
+    is_verbose : bool
+        If True, print detailed progress information (default: True)
+    
+    Returns:
+    --------
+    pd.DataFrame: Concatenated DataFrame with all moves from all games in the date range
+    """
+    start_date = datetime.strptime(date_start, '%Y-%m-%d')
+    end_date = datetime.strptime(date_finish, '%Y-%m-%d')
+    
+    # Find all CSV files in the date range
+    games_analysis_dir = Path('data') / 'games_analysis'
+    
+    if not games_analysis_dir.exists():
+        if is_verbose:
+            print(f"❌ Analysis directory does not exist: {games_analysis_dir}")
+        return pd.DataFrame()
+    
+    if is_verbose:
+        print(f"Loading CSV files from: {games_analysis_dir}")
+        print(f"Date range: {date_start} to {date_finish}")
+    
+    # Find all CSV files in the date range (date_finish is exclusive)
+    all_csv_files = []
+    current_date = start_date
+    while current_date < end_date:
+        date_str = current_date.strftime('%Y-%m-%d')
+        pattern = f"{date_str}_game_*.csv"
+        csv_files = list(games_analysis_dir.glob(pattern))
+        all_csv_files.extend(csv_files)
+        current_date += timedelta(days=1)
+    
+    if not all_csv_files:
+        if is_verbose:
+            print(f"No CSV files found for date range {date_start} to {date_finish}")
+        return pd.DataFrame()
+    
+    if is_verbose:
+        print(f"\n{'=' * 80}")
+        print(f"Found {len(all_csv_files)} CSV files to load")
+        print(f"{'=' * 80}")
+    
+    # Load each CSV file and concatenate
+    all_dataframes = []
+    for i, csv_file in enumerate(sorted(all_csv_files), 1):
+        if is_verbose:
+            print(f"[{i}/{len(all_csv_files)}] Loading {csv_file.name}...")
+        
+        try:
+            df = pd.read_csv(csv_file, encoding='utf-8')
+            
+            # Convert datetime columns if they exist
+            for col in df.columns:
+                if 'time' in col.lower() and df[col].dtype == 'object':
+                    try:
+                        df[col] = pd.to_datetime(df[col], errors='coerce')
+                    except:
+                        pass
+            
+            if not df.empty:
+                all_dataframes.append(df)
+                
+                if is_verbose:
+                    print(f"  ✅ Loaded {len(df)} moves")
+        
+        except Exception as e:
+            if is_verbose:
+                print(f"  ❌ Error loading {csv_file.name}: {e}")
+            continue
+    
+    if not all_dataframes:
+        if is_verbose:
+            print("\nNo data was loaded.")
+        return pd.DataFrame()
+    
+    # Concatenate all dataframes
+    df_all = pd.concat(all_dataframes, ignore_index=True)
+    
+    if is_verbose:
+        print(f"\n{'=' * 80}")
+        print("FINAL SUMMARY")
+        print(f"{'=' * 80}")
+        print(f"✅ Total moves loaded: {len(df_all)}")
+        print(f"📊 DataFrame shape: {df_all.shape}")
+        print(f"📋 Columns: {len(df_all.columns)}")
+        if 'eco_code' in df_all.columns:
+            eco_counts = df_all['eco_code'].value_counts()
+            print(f"📚 Unique ECO codes: {len(eco_counts)}")
+    
+    return df_all
 
