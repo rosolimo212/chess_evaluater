@@ -1980,4 +1980,194 @@ def make_user_df(df):
     return user_base_df
     
 
+
+def get_move_stat(work_df, fields=['color']):
+    """
+    Get statistics from the work dataframe.
+    One row = one players move in one game.
+    Parameters:
+    -----------
+    work_df : pd.DataFrame
+        Work dataframe
+    fields : list
+        Fields to group by. 
+        Player adds in fields automatically.
+    Returns:
+    --------
+    pd.DataFrame: Statistics dataframe
+    """
+    full_fields = fields.copy()
+    full_fields.append('player')
+    full_fields.reverse()
+
+    stat_df = work_df.groupby(full_fields).agg(
+        games = ('game_id', 'nunique'),
+        moves_total = ('move_number', 'count'),
+        points = ('points', 'mean'),
+        rating = ('rating', 'mean'),
+        opponent_rating = ('opponent_rating', 'mean'),
+        rating_difference = ('rating_difference', 'mean'),
+        time_used_total = ('time_used', 'max'),
+        time_remaining_avg = ('time_remaining', 'mean'),
+        material_balance_max = ('material_balance', 'max'),
+        material_balance_min = ('material_balance', 'min'),
+        normal_moves = ('move_type', lambda x: (x == 'normal').sum()),
+        inaccuracy_moves = ('move_type', lambda x: (x == 'inaccuracy').sum()),
+        blunder_moves = ('move_type', lambda x: (x == 'blunder').sum()),
+        mistake_moves = ('move_type', lambda x: (x == 'mistake').sum()),
+        good_moves = ('move_type', lambda x: (x == 'good').sum()),
+        eval_avg = ('evaluation_pawns_relative', 'mean'),
+        last_eval = ('evaluation_pawns_relative', 'last'),
+        eval_change_total = ('eval_change', 'sum'),
+    ).reset_index()
+    stat_df['accur'] = stat_df['eval_change_total'] / stat_df['moves_total']
+    # magic constant
+    # kx+b in this logic
+    # accur = 3 (ist line) = 1
+    # accur = -7 (lose material every move) = 0
+    stat_df['accur'] = 10/13/10 * stat_df['accur'] + 10/13
+    stat_df['accur'] = np.where(
+        stat_df['accur'] < 0, 
+        0, 
+        stat_df['accur']
+        )
+    stat_df['accur'] = np.where(
+        stat_df['accur'] > 1, 
+        1, 
+        stat_df['accur']
+        )
     
+
+    return stat_df
+
+
+def get_player_stat(df, fields=['color']):
+    """
+    Get statistics from the dataframe.
+    One row = one player.
+    Parameters:
+    -----------
+    df : pd.DataFrame
+        Dataframe
+    fields : list 
+        Fields to group by. 
+        Player adds in fields automatically.
+    Returns:
+    --------
+    pd.DataFrame: Statistics dataframe
+    """
+    player_fileds = fields.copy()
+    player_fileds.append('game_id')
+    player_fileds.append('opponent')
+
+    right_fileds = fields.copy()
+    right_fileds.append('opponent')
+    right_fileds.append('game_id')
+
+    left_fileds = fields.copy()
+    left_fileds.append('player')
+    left_fileds.append('game_id')
+
+    # quick fix for color
+    for col in right_fileds:
+        if col == 'color':
+            right_fileds.remove(col)
+    for col in left_fileds:
+        if col == 'color':
+            left_fileds.remove(col)
+
+    opponent_fileds = right_fileds.copy()
+    opponent_fileds.append('accur')
+
+    game_stat_df_base = get_move_stat(df, fields=player_fileds)
+    game_stat_df = game_stat_df_base.merge(
+        game_stat_df_base[opponent_fileds],
+        'left',
+        left_on=left_fileds,
+        right_on=right_fileds,
+        suffixes=('', '_opponent')
+    )
+    del game_stat_df['opponent_opponent']
+
+    game_stat_df['xG'] = game_stat_df['accur'] - game_stat_df['accur_opponent']
+
+    player_stat_fields = fields.copy()
+    player_stat_fields.append('player')
+    player_stat_fields.reverse()
+
+    player_stat_df = game_stat_df.groupby(player_stat_fields).agg(
+        games = ('game_id', 'nunique'),
+        moves = ('moves_total', 'sum'),
+        winrate = ('points', 'mean'),
+        rating = ('rating', 'mean'),
+        opponent_rating = ('opponent_rating', 'mean'),
+        accur = ('accur', 'mean'),
+        accur_opponent = ('accur_opponent', 'mean'),
+        xG = ('xG', 'mean'),
+        time_used_avg = ('time_used_total', 'mean'),
+        time_remaining_avg = ('time_remaining_avg', 'mean'),
+        good_moves = ('good_moves', 'sum'),
+        normal_moves = ('normal_moves', 'sum'),
+        inaccuracy_moves = ('inaccuracy_moves', 'sum'),
+        mistake_moves = ('mistake_moves', 'sum'),
+        blunder_moves = ('blunder_moves', 'sum'),
+        last_eval = ('last_eval', 'mean'),
+    ).reset_index()
+    player_stat_df['rating_difference'] = player_stat_df['rating'] - player_stat_df['opponent_rating']
+    player_stat_df['moves_per_game'] = player_stat_df['moves'] / player_stat_df['games']
+
+    player_stat_df['good_moves'] = player_stat_df['good_moves'] / player_stat_df['moves']
+    player_stat_df['normal_moves'] = player_stat_df['normal_moves'] / player_stat_df['moves']
+    player_stat_df['inaccuracy_moves'] = player_stat_df['inaccuracy_moves'] / player_stat_df['moves']
+    player_stat_df['mistake_moves'] = player_stat_df['mistake_moves'] / player_stat_df['moves']
+    player_stat_df['blunder_moves'] = player_stat_df['blunder_moves'] / player_stat_df['moves']
+
+    return player_stat_df
+
+
+
+def get_adv_cap(work_df, fields=[], brackets=(-4, 4)):
+    """
+    Get advanced capitallisation statistics from the work dataframe.
+    Parameters:
+    -----------
+    work_df : pd.DataFrame
+        Work dataframe
+    fields : list
+        Fields to group by. 
+        Player adds in fields automatically.
+    brackets : tuple
+        Brackets for evaluation pawns relative group.
+    Returns:
+    --------
+    pd.DataFrame: Advanced wide capitallisation dataframe
+    pd.DataFrame: Advanced capitallisation statistics in owe row
+    pd.DataFrame: Resoursefillness statistics in own row
+    """
+    full_fields = fields.copy()
+    full_fields.append('evaluation_pawns_relative_group')
+    adv_cap_df = get_player_stat(work_df, fields=full_fields)
+    adv_cap_df = adv_cap_df[
+                    (adv_cap_df['evaluation_pawns_relative_group'] >= brackets[0]) &
+                    (adv_cap_df['evaluation_pawns_relative_group'] <= brackets[1])
+                    ]
+    
+    base_fields = fields.copy()
+    base_fields.append('player')
+    base_fields.append('games')
+    adv_cap_df_base = get_player_stat(work_df, fields=fields)[base_fields]
+    join_fields = fields.copy()
+    join_fields.append('player')
+    adv_cap_df = adv_cap_df.merge(adv_cap_df_base, 'left', on=join_fields, suffixes=('', '_base'))
+    adv_cap_df['share'] = adv_cap_df['games'] / adv_cap_df['games_base']
+
+    adv_cap_stat = adv_cap_df[adv_cap_df['evaluation_pawns_relative_group'] > 0].groupby(join_fields).agg(
+        share = ('share', 'mean'),
+        winrate = ('winrate', 'mean'),
+    ).reset_index()
+
+    res_stat = adv_cap_df[adv_cap_df['evaluation_pawns_relative_group'] < 0].groupby(join_fields).agg(
+        share = ('share', 'mean'),
+        winrate = ('winrate', 'mean'),
+    ).reset_index()
+    return adv_cap_df, adv_cap_stat, res_stat
