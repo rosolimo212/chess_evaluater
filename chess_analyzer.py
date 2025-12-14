@@ -506,7 +506,7 @@ def fetch_chess_com_games(username, date, save_dir='chess_games', is_verbose=Tru
         
         # Convert end_time to datetime if available
         if 'end_time' in df.columns:
-            df['end_time'] = pd.to_datetime(df['end_time'], errors='coerce')
+            df['end_time'] = pd.to_datetime(df['end_time'])
         
         # Save DataFrame to CSV
         csv_filename = f"{username}_{year}-{month:02d}_games.csv"
@@ -626,7 +626,7 @@ def analyze_pgn_evaluations(pgn, engine_path=None, depth=10, data_dir=None):
                     for col in df.columns:
                         if 'time' in col.lower() and df[col].dtype == 'object':
                             try:
-                                df[col] = pd.to_datetime(df[col], errors='coerce')
+                                df[col] = pd.to_datetime(df[col])
                             except:
                                 pass
                     return df
@@ -651,7 +651,7 @@ def analyze_pgn_evaluations(pgn, engine_path=None, depth=10, data_dir=None):
                 for col in df.columns:
                     if 'time' in col.lower() and df[col].dtype == 'object':
                         try:
-                            df[col] = pd.to_datetime(df[col], errors='coerce')
+                            df[col] = pd.to_datetime(df[col])
                         except:
                             pass
                 return df
@@ -1214,7 +1214,7 @@ def start_analyze(user_name, date_range, is_verbose=True, is_api=1, path='chess_
                 for col in df_moves.columns:
                     if 'time' in col.lower() and df_moves[col].dtype == 'object':
                         try:
-                            df_moves[col] = pd.to_datetime(df_moves[col], errors='coerce')
+                            df_moves[col] = pd.to_datetime(df_moves[col])
                         except:
                             pass
                 
@@ -1587,7 +1587,7 @@ def analyze_game(path, engine_path=None, is_verbose=True, depth=10):
         return False
 
 
-def analyze_games(date_start, date_finish, user_name, engine_path=None, is_verbose=True, depth=10):
+def analyze_games(date_start, date_finish, engine_path=None, is_verbose=True, depth=10):
     """
     Launch analyze_game() for all games in the date range.
     
@@ -1748,7 +1748,7 @@ def get_analysys_results(date_start, date_finish, is_verbose=True):
             for col in df.columns:
                 if 'time' in col.lower() and df[col].dtype == 'object':
                     try:
-                        df[col] = pd.to_datetime(df[col], errors='coerce')
+                        df[col] = pd.to_datetime(df[col], format='%Y-%m-%d %H:%M:%S', errors='raise')
                     except:
                         pass
             
@@ -1777,7 +1777,7 @@ def get_analysys_results(date_start, date_finish, is_verbose=True):
                             # Convert end_time to datetime if it's a string
                             if 'end_time' in df.columns and df['end_time'].dtype == 'object':
                                 try:
-                                    df['end_time'] = pd.to_datetime(df['end_time'], errors='coerce')
+                                    df['end_time'] = pd.to_datetime(df['end_time'])
                                 except:
                                     pass
                     except Exception as e:
@@ -1976,6 +1976,8 @@ def make_user_df(df):
                                                         )
     user_base_df['evaluation_pawns_group'] = np.round(user_base_df['evaluation_pawns_relative'], 0).astype(int)
     user_base_df['evaluation_pawns_relative_group'] = np.round(user_base_df['evaluation_pawns_relative'], 0).astype(int)
+    user_base_df['date'] = user_base_df['game_end_time'].dt.date
+    user_base_df['week'] = (user_base_df['game_end_time'] - pd.to_timedelta(user_base_df['game_end_time'].dt.weekday, unit='d')).dt.date
     
     return user_base_df
     
