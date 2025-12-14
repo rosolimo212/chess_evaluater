@@ -14,6 +14,10 @@ import chess.pgn
 import chess.engine
 from io import StringIO
 import shutil
+import os
+
+# Default data directory - absolute path
+DEFAULT_DATA_DIR = Path(__file__).parent / 'data'
 
 
 def find_stockfish():
@@ -349,10 +353,11 @@ def extract_clock_from_comment(comment):
     return None
 
 
-def fetch_chess_com_games(username, date, save_dir='chess_games', is_verbose=True):
+def fetch_chess_com_games(username, date, save_dir=None, is_verbose=True):
     """
     Fetch chess games from chess.com API for a specific user and date.
-    Saves games as PGN files and returns a DataFrame with game metadata.
+    Saves games as PGN files to data/pgn and metadata to data/game_meta.
+    Returns a DataFrame with game metadata.
     
     Parameters:
     -----------
@@ -360,8 +365,8 @@ def fetch_chess_com_games(username, date, save_dir='chess_games', is_verbose=Tru
         Chess.com username
     date : str or datetime
         Date in format 'YYYY-MM-DD' or datetime object
-    save_dir : str
-        Directory to save PGN files (default: 'chess_games')
+    save_dir : str or Path, optional
+        Base directory (default: DEFAULT_DATA_DIR). Files saved to save_dir/pgn and save_dir/game_meta
     is_verbose : bool
         If True, print detailed progress information (default: True)
     
@@ -369,6 +374,12 @@ def fetch_chess_com_games(username, date, save_dir='chess_games', is_verbose=Tru
     --------
     pd.DataFrame: DataFrame with game metadata including unique game_id and pgn_path
     """
+    # Use default data directory if not specified
+    if save_dir is None:
+        save_dir = DEFAULT_DATA_DIR
+    else:
+        save_dir = Path(save_dir)
+    
     # Convert date to datetime if string
     if isinstance(date, str):
         date_obj = datetime.strptime(date, '%Y-%m-%d')
@@ -378,9 +389,12 @@ def fetch_chess_com_games(username, date, save_dir='chess_games', is_verbose=Tru
     year = date_obj.year
     month = date_obj.month
     
-    # Create save directory if it doesn't exist
-    save_path = Path(save_dir)
-    save_path.mkdir(exist_ok=True)
+    # Create save directories using data/ structure
+    base_dir = Path(save_dir)
+    pgn_dir = base_dir / 'pgn'
+    game_meta_dir = base_dir / 'game_meta'
+    pgn_dir.mkdir(parents=True, exist_ok=True)
+    game_meta_dir.mkdir(parents=True, exist_ok=True)
     
     # Chess.com API JSON endpoint (provides metadata)
     json_url = f"https://api.chess.com/pub/player/{username}/games/{year}/{month:02d}"
@@ -441,9 +455,7 @@ def fetch_chess_com_games(username, date, save_dir='chess_games', is_verbose=Tru
                     except:
                         pass  # Use default if parsing fails
             
-            # Save PGN file to data/pgn folder with pattern: yyyy-mm-dd_game_id.pgn
-            pgn_dir = Path(save_dir) / 'data' / 'pgn'
-            pgn_dir.mkdir(parents=True, exist_ok=True)
+            # Save PGN file to pgn folder with pattern: yyyy-mm-dd_game_id.pgn
             filename = f"{game_date_str}_game_{unique_game_id}.pgn"
             filepath = pgn_dir / filename
             
@@ -479,7 +491,7 @@ def fetch_chess_com_games(username, date, save_dir='chess_games', is_verbose=Tru
             # Build game record
             game_record = {
                 'game_id': unique_game_id,  # Unique identifier
-                'pgn_path': str(filepath),  # Path to PGN file in data/pgn folder
+                'pgn_path': str(filepath),  # Path to PGN file
                 'url': game_url,
                 'white_username': white.get('username', ''),
                 'white_rating': white.get('rating', None),
@@ -495,9 +507,17 @@ def fetch_chess_com_games(username, date, save_dir='chess_games', is_verbose=Tru
                 'end_time': end_date,
                 'end_timestamp': end_time,
                 'rated': game.get('rated', False),
+                'game_date': game_date_str,
             }
             
             games_data.append(game_record)
+            
+            # Save metadata to data/game_meta folder
+            meta_filename = f"{game_date_str}_game_{unique_game_id}.csv"
+            meta_filepath = game_meta_dir / meta_filename
+            meta_df = pd.DataFrame([game_record])
+            meta_df.to_csv(meta_filepath, index=False, encoding='utf-8')
+            
             if is_verbose:
                 print(f"  [{i+1}/{len(games_list)}] Saved: {filename} (ID: {unique_game_id})")
         
@@ -508,15 +528,9 @@ def fetch_chess_com_games(username, date, save_dir='chess_games', is_verbose=Tru
         if 'end_time' in df.columns:
             df['end_time'] = pd.to_datetime(df['end_time'])
         
-        # Save DataFrame to CSV
-        csv_filename = f"{username}_{year}-{month:02d}_games.csv"
-        csv_filepath = save_path / csv_filename
-        df.to_csv(csv_filepath, index=False, encoding='utf-8')
-        
         if is_verbose:
             print(f"\n✅ Successfully saved {len(df)} games to {save_dir}/")
             print(f"📊 DataFrame created with {len(df)} rows and {len(df.columns)} columns")
-            print(f"💾 Saved metadata to CSV: {csv_filename}")
         
         return df
         
@@ -547,6 +561,7 @@ def fetch_chess_com_games(username, date, save_dir='chess_games', is_verbose=Tru
 def analyze_pgn_evaluations(pgn, engine_path=None, depth=10, data_dir=None):
     """
     Analyze a PGN game and return a DataFrame with move numbers, engine evaluations, and position metrics.
+    Saves results to data/games_analysis folder.
     
     Parameters:
     -----------
@@ -558,8 +573,8 @@ def analyze_pgn_evaluations(pgn, engine_path=None, depth=10, data_dir=None):
     depth : int
         Engine search depth (default: 10)
     data_dir : str or Path, optional
-        Path to folder with PGN and CSV files. If provided and CSV file with analysis exists,
-        will load from disk instead of analyzing. If not provided or CSV doesn't exist, will analyze and save.
+        Base directory (default: DEFAULT_DATA_DIR). Analysis saved to data_dir/games_analysis.
+        If CSV file with analysis exists, will load from disk instead of analyzing.
     
     Returns:
     --------
@@ -581,6 +596,12 @@ def analyze_pgn_evaluations(pgn, engine_path=None, depth=10, data_dir=None):
         pgn_text = str(pgn)
         pgn_file_path = None
     
+    # Use default data directory if not specified
+    if data_dir is None:
+        data_dir = DEFAULT_DATA_DIR
+    else:
+        data_dir = Path(data_dir)
+    
     # Check if we should load from disk
     if pgn_file_path is not None:
         # Try to extract game date and ID from filename
@@ -597,25 +618,10 @@ def analyze_pgn_evaluations(pgn, engine_path=None, depth=10, data_dir=None):
         if game_id_match:
             game_id = game_id_match.group(1)
         
-        # Try to load from data/games_analysis first
+        # Try to load from data/games_analysis
         if game_date_str and game_id:
-            # Determine games_analysis directory
-            if data_dir is not None:
-                data_dir_path = Path(data_dir)
-                # If data_dir is 'data', use it directly; otherwise assume it's the base directory
-                if data_dir_path.name == 'data':
-                    games_analysis_dir = data_dir_path / 'games_analysis'
-                else:
-                    games_analysis_dir = data_dir_path / 'data' / 'games_analysis'
-            else:
-                # Try to find data directory relative to PGN file
-                pgn_parent = pgn_file_path.parent
-                if pgn_parent.name == 'pgn':
-                    base_dir = pgn_parent.parent
-                else:
-                    base_dir = pgn_parent
-                games_analysis_dir = base_dir / 'data' / 'games_analysis'
-            
+            data_dir_path = Path(data_dir)
+            games_analysis_dir = data_dir_path / 'games_analysis'
             csv_file_path = games_analysis_dir / f"{game_date_str}_game_{game_id}.csv"
             
             if csv_file_path.exists():
@@ -633,31 +639,6 @@ def analyze_pgn_evaluations(pgn, engine_path=None, depth=10, data_dir=None):
                 except Exception as e:
                     # If loading fails, continue with analysis
                     pass
-        
-        # Fallback: try old location/pattern
-        if data_dir is not None:
-            search_dir = Path(data_dir)
-        else:
-            search_dir = pgn_file_path.parent
-        
-        pgn_stem = pgn_file_path.stem
-        csv_file_path = search_dir / f"{pgn_stem}_analysis.csv"
-        
-        if csv_file_path.exists():
-            # Load from CSV
-            try:
-                df = pd.read_csv(csv_file_path, encoding='utf-8')
-                # Convert datetime columns if they exist
-                for col in df.columns:
-                    if 'time' in col.lower() and df[col].dtype == 'object':
-                        try:
-                            df[col] = pd.to_datetime(df[col])
-                        except:
-                            pass
-                return df
-            except Exception as e:
-                # If loading fails, continue with analysis
-                pass
     
     # Parse PGN
     game = chess.pgn.read_game(StringIO(pgn_text))
@@ -958,49 +939,31 @@ def analyze_pgn_evaluations(pgn, engine_path=None, depth=10, data_dir=None):
     
     # Save to CSV in data/games_analysis folder with pattern: yyyy-mm-dd_game_id.csv
     if game_date_str and game_id:
-        # Determine games_analysis directory
-        if data_dir is not None:
-            data_dir_path = Path(data_dir)
-            # If data_dir is 'data', use it directly; otherwise assume it's the base directory
-            if data_dir_path.name == 'data':
-                games_analysis_dir = data_dir_path / 'games_analysis'
-            else:
-                games_analysis_dir = data_dir_path / 'data' / 'games_analysis'
-        elif pgn_file_path is not None:
-            # Try to find data directory relative to PGN file
-            pgn_parent = pgn_file_path.parent
-            if pgn_parent.name == 'pgn':
-                base_dir = pgn_parent.parent
-            else:
-                base_dir = pgn_parent
-            games_analysis_dir = base_dir / 'data' / 'games_analysis'
-        else:
-            games_analysis_dir = Path('data') / 'games_analysis'
-        
+        data_dir_path = Path(data_dir)
+        games_analysis_dir = data_dir_path / 'games_analysis'
         games_analysis_dir.mkdir(parents=True, exist_ok=True)
         csv_filename = f"{game_date_str}_game_{game_id}.csv"
         csv_file_path = games_analysis_dir / csv_filename
         df.to_csv(csv_file_path, index=False, encoding='utf-8')
-    elif data_dir is not None and pgn_file_path is not None:
-        # Fallback to old behavior if date/id not available
+    else:
+        # Fallback if date/id not available - save to data/games_analysis anyway
         data_dir_path = Path(data_dir)
-        data_dir_path.mkdir(exist_ok=True)
-        pgn_stem = pgn_file_path.stem
-        csv_file_path = data_dir_path / f"{pgn_stem}_analysis.csv"
-        df.to_csv(csv_file_path, index=False, encoding='utf-8')
-    elif pgn_file_path is not None:
-        # If no data_dir specified but we have a file path, save in same directory as PGN
-        pgn_dir = pgn_file_path.parent
-        pgn_stem = pgn_file_path.stem
-        csv_file_path = pgn_dir / f"{pgn_stem}_analysis.csv"
+        games_analysis_dir = data_dir_path / 'games_analysis'
+        games_analysis_dir.mkdir(parents=True, exist_ok=True)
+        if pgn_file_path is not None:
+            pgn_stem = pgn_file_path.stem
+            csv_file_path = games_analysis_dir / f"{pgn_stem}_analysis.csv"
+        else:
+            csv_file_path = games_analysis_dir / "unknown_game_analysis.csv"
         df.to_csv(csv_file_path, index=False, encoding='utf-8')
     
     return df
 
 
-def analyze_games_from_chess_com(username, date, save_dir='chess_games', engine_path=None, depth=10, is_verbose=True, data_dir=None):
+def analyze_games_from_chess_com(username, date, save_dir=None, engine_path=None, depth=10, is_verbose=True, data_dir=None):
     """
     Fetch games from chess.com and analyze all of them, returning a wide DataFrame with all moves from all games.
+    Saves PGN files to data/pgn, metadata to data/game_meta, and analysis to data/games_analysis.
     
     Parameters:
     -----------
@@ -1008,8 +971,8 @@ def analyze_games_from_chess_com(username, date, save_dir='chess_games', engine_
         Chess.com username
     date : str or datetime
         Date in format 'YYYY-MM-DD' or datetime object
-    save_dir : str
-        Base directory (default: 'chess_games'). PGN files will be saved to save_dir/data/pgn
+    save_dir : str or Path, optional
+        Base directory (default: DEFAULT_DATA_DIR). Files saved to save_dir/pgn, save_dir/game_meta, save_dir/games_analysis
     engine_path : str, optional
         Path to chess engine executable. If None, will try to find Stockfish automatically.
     depth : int
@@ -1017,16 +980,24 @@ def analyze_games_from_chess_com(username, date, save_dir='chess_games', engine_
     is_verbose : bool
         If True, print detailed progress information (default: True)
     data_dir : str or Path, optional
-        Base directory for loading analysis CSV files. If provided, will try to load analysis from CSV files
-        in data_dir/data/games_analysis instead of re-analyzing. If not provided, uses save_dir as data_dir.
+        Base directory for loading analysis CSV files (default: same as save_dir).
+        Analysis files are in data_dir/games_analysis.
     
     Returns:
     --------
     pd.DataFrame: Wide DataFrame with all moves from all games, including game metadata
     """
+    # Use default data directory if not specified
+    if save_dir is None:
+        save_dir = DEFAULT_DATA_DIR
+    else:
+        save_dir = Path(save_dir)
+    
     # Use save_dir as data_dir if data_dir not provided
     if data_dir is None:
         data_dir = save_dir
+    else:
+        data_dir = Path(data_dir)
     
     # Step 1: Fetch games
     if is_verbose:
@@ -1100,7 +1071,7 @@ def analyze_games_from_chess_com(username, date, save_dir='chess_games', engine_
     return df_all_moves
 
 
-def start_analyze(user_name, date_range, is_verbose=True, is_api=1, path='chess_games', engine_path=None, depth=10):
+def start_analyze(user_name, date_range, is_verbose=True, is_api=1, path=None, engine_path=None, depth=10):
     """
     Analyze chess games from chess.com for a user over a date range.
     This is a convenience function that handles date ranges and combines results.
@@ -1115,8 +1086,8 @@ def start_analyze(user_name, date_range, is_verbose=True, is_api=1, path='chess_
         If True, print detailed progress information (default: True)
     is_api : int
         If 1, fetch games from chess.com API. If 0, only analyze existing PGN files (default: 1)
-    path : str
-        Directory to save/load PGN files (default: 'chess_games')
+    path : str or Path, optional
+        Base directory (default: DEFAULT_DATA_DIR). Files saved to path/pgn, path/game_meta, path/games_analysis
     engine_path : str, optional
         Path to chess engine executable. If None, will try to find Stockfish automatically.
     depth : int
@@ -1126,6 +1097,12 @@ def start_analyze(user_name, date_range, is_verbose=True, is_api=1, path='chess_
     --------
     pd.DataFrame: Wide DataFrame with all moves from all games, including game metadata and ECO codes
     """
+    # Use default data directory if not specified
+    if path is None:
+        path = DEFAULT_DATA_DIR
+    else:
+        path = Path(path)
+    
     start_date_str, end_date_str = date_range
     start_date = datetime.strptime(start_date_str, '%Y-%m-%d')
     end_date = datetime.strptime(end_date_str, '%Y-%m-%d')
@@ -1163,12 +1140,9 @@ def start_analyze(user_name, date_range, is_verbose=True, is_api=1, path='chess_
         # Load existing analysis CSV files from data/games_analysis folder
         # Files are named with pattern: yyyy-mm-dd_game_id.csv
         path_obj = Path(path)
-        if not path_obj.is_absolute():
-            # If path is relative, resolve it relative to current working directory
-            path_obj = Path(path).resolve()
         
-        # Look for CSV files in data/games_analysis folder
-        games_analysis_dir = path_obj / 'data' / 'games_analysis'
+        # Look for CSV files in games_analysis folder
+        games_analysis_dir = path_obj / 'games_analysis'
         
         if not games_analysis_dir.exists():
             if is_verbose:
@@ -1277,10 +1251,13 @@ def get_data(date_start, date_finish, user_name, is_verbose=True):
     start_date = datetime.strptime(date_start, '%Y-%m-%d')
     end_date = datetime.strptime(date_finish, '%Y-%m-%d')
     
+    # Use default data directory
+    data_dir = DEFAULT_DATA_DIR
+    
     # Create directories
-    pgn_dir = Path('data') / 'pgn'
+    pgn_dir = data_dir / 'pgn'
     pgn_dir.mkdir(parents=True, exist_ok=True)
-    game_meta_dir = Path('data') / 'game_meta'
+    game_meta_dir = data_dir / 'game_meta'
     game_meta_dir.mkdir(parents=True, exist_ok=True)
     
     # Chess.com API requires User-Agent header to avoid 403 errors
@@ -1515,7 +1492,7 @@ def analyze_game(path, engine_path=None, is_verbose=True, depth=10):
     game_id = game_id_match.group(1)
     
     # Check if analysis already exists
-    games_analysis_dir = Path('data') / 'games_analysis'
+    games_analysis_dir = DEFAULT_DATA_DIR / 'games_analysis'
     games_analysis_dir.mkdir(parents=True, exist_ok=True)
     csv_file_path = games_analysis_dir / f"{game_date_str}_game_{game_id}.csv"
     
@@ -1529,7 +1506,7 @@ def analyze_game(path, engine_path=None, is_verbose=True, depth=10):
     
     try:
         # Load game metadata if available
-        game_meta_dir = Path('data') / 'game_meta'
+        game_meta_dir = DEFAULT_DATA_DIR / 'game_meta'
         meta_filepath = game_meta_dir / f"{game_date_str}_game_{game_id}.csv"
         
         game_meta = None
@@ -1553,7 +1530,7 @@ def analyze_game(path, engine_path=None, is_verbose=True, depth=10):
             pgn_path,
             engine_path=engine_path,
             depth=depth,
-            data_dir='data'  # This will save to data/games_analysis
+            data_dir=DEFAULT_DATA_DIR  # This will save to data/games_analysis
         )
         
         if df.empty:
@@ -1567,7 +1544,7 @@ def analyze_game(path, engine_path=None, is_verbose=True, depth=10):
                 df[key] = value
         
         # Save the merged DataFrame
-        games_analysis_dir = Path('data') / 'games_analysis'
+        games_analysis_dir = DEFAULT_DATA_DIR / 'games_analysis'
         games_analysis_dir.mkdir(parents=True, exist_ok=True)
         csv_file_path = games_analysis_dir / f"{game_date_str}_game_{game_id}.csv"
         df.to_csv(csv_file_path, index=False, encoding='utf-8')
@@ -1614,7 +1591,7 @@ def analyze_games(date_start, date_finish, engine_path=None, is_verbose=True, de
     end_date = datetime.strptime(date_finish, '%Y-%m-%d')
     
     # Find all PGN files in the date range
-    pgn_dir = Path('data') / 'pgn'
+    pgn_dir = DEFAULT_DATA_DIR / 'pgn'
     
     if not pgn_dir.exists():
         if is_verbose:
@@ -1653,7 +1630,7 @@ def analyze_games(date_start, date_finish, engine_path=None, is_verbose=True, de
         game_id_match = re.search(r'game_(\d+)', pgn_file.stem)
         
         if date_match and game_id_match:
-            csv_file = Path('data') / 'games_analysis' / f"{date_match.group(1)}_game_{game_id_match.group(1)}.csv"
+            csv_file = DEFAULT_DATA_DIR / 'games_analysis' / f"{date_match.group(1)}_game_{game_id_match.group(1)}.csv"
             if csv_file.exists():
                 stats['skipped'] += 1
                 if is_verbose:
@@ -1680,9 +1657,10 @@ def analyze_games(date_start, date_finish, engine_path=None, is_verbose=True, de
     return stats
 
 
-def get_analysys_results(date_start, date_finish, is_verbose=True):
+def get_analysys_results(date_start, date_finish, is_verbose=True, api=0, user_name=None, engine_path=None, depth=10):
     """
     Concatenate CSV files from data/games_analysis folder by date range.
+    If api=1, first downloads all games from chess.com API and analyzes them.
     
     Parameters:
     -----------
@@ -1692,16 +1670,49 @@ def get_analysys_results(date_start, date_finish, is_verbose=True):
         End date in format 'YYYY-MM-DD' (exclusive - not included in range)
     is_verbose : bool
         If True, print detailed progress information (default: True)
+    api : int
+        If 1, download all games from chess.com API and analyze them first (default: 0)
+    user_name : str, optional
+        Chess.com username (required if api=1)
+    engine_path : str, optional
+        Path to chess engine executable (required if api=1). If None, will try to find Stockfish automatically.
+    depth : int
+        Engine search depth (default: 10, used if api=1)
     
     Returns:
     --------
     pd.DataFrame: Concatenated DataFrame with all moves from all games in the date range
     """
+    # If api=1, download all batches and analyze them first
+    if api == 1:
+        if user_name is None:
+            raise ValueError("user_name is required when api=1")
+        
+        if is_verbose:
+            print("=" * 80)
+            print("STEP 1: DOWNLOADING GAMES FROM CHESS.COM API")
+            print("=" * 80)
+        
+        # Download all games in the date range
+        get_data(date_start, date_finish, user_name, is_verbose=is_verbose)
+        
+        if is_verbose:
+            print("\n" + "=" * 80)
+            print("STEP 2: ANALYZING DOWNLOADED GAMES")
+            print("=" * 80)
+        
+        # Analyze all downloaded games
+        analyze_games(date_start, date_finish, engine_path=engine_path, is_verbose=is_verbose, depth=depth)
+        
+        if is_verbose:
+            print("\n" + "=" * 80)
+            print("STEP 3: LOADING ANALYSIS RESULTS")
+            print("=" * 80)
     start_date = datetime.strptime(date_start, '%Y-%m-%d')
     end_date = datetime.strptime(date_finish, '%Y-%m-%d')
     
     # Find all CSV files in the date range
-    games_analysis_dir = Path('data') / 'games_analysis'
+    games_analysis_dir = DEFAULT_DATA_DIR / 'games_analysis'
     
     if not games_analysis_dir.exists():
         if is_verbose:
@@ -1733,7 +1744,7 @@ def get_analysys_results(date_start, date_finish, is_verbose=True):
         print(f"{'=' * 80}")
     
     # Load metadata directory for merging
-    game_meta_dir = Path('data') / 'game_meta'
+    game_meta_dir = DEFAULT_DATA_DIR / 'game_meta'
     
     # Load each CSV file and concatenate
     all_dataframes = []
